@@ -1,15 +1,16 @@
 ```
-  ██╗          ██████╗
-  ██║         ██╔════╝
-  ██║         ██║
-  ██║         ██║
-  ███████╗    ╚██████╗
-  ╚══════╝     ╚═════╝
+   █████╗  ██████╗████████╗██╗   ██╗ █████╗ ██╗     ██╗  ██╗   ██╗
+  ██╔══██╗██╔════╝╚══██╔══╝██║   ██║██╔══██╗██║     ██║  ╚██╗ ██╔╝
+  ███████║██║        ██║   ██║   ██║███████║██║     ██║   ╚████╔╝
+  ██╔══██║██║        ██║   ██║   ██║██╔══██║██║     ██║    ╚██╔╝
+  ██║  ██║╚██████╗   ██║   ╚██████╔╝██║  ██║███████╗███████╗██║██╗
+  ╚═╝  ╚═╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝╚═╝
+                     L L A M A
 ```
 
-# l.c
+# actually.llama
 
-one file. one llama. no excuses.
+symbiote of Karpathy's [nanochat](https://github.com/karpathy/nanochat) and [microGPT](https://github.com/karpathy/minGPT). but actually Llama.
 
 **by [Arianna Method](https://github.com/ariannamethod)**
 
@@ -19,60 +20,60 @@ one file. one llama. no excuses.
 cc l.c -O3 -lm -lpthread -o l && ./l --depth 4
 ```
 
-that's it. that's the whole framework.
+that's it. that's the whole framework. you just compiled and ran it.
+while you were reading this sentence, someone opened a jupyter notebook
+and is still waiting for `pip install torch` to finish.
 
 ---
 
 ## what
 
-1907 lines of C. compiles in 0.3 seconds. trains a full Llama 3 from scratch.
-finetunes on any personality. exports GGUF. runs interactive chat.
+one C file. 1909 lines. trains a full **Llama 3** from scratch.
+trains its own BPE tokenizer. writes analytical backward passes by hand.
+finetunes on any personality you throw at it. exports GGUF. chats with you.
 
 no Python. no PyTorch. no pip. no conda. no venv. no docker.
-no requirements.txt. no "works on my machine."
-
-a C compiler. `-lm`. `-lpthread`. done.
+no requirements.txt. no "works on my machine." no excuses.
 
 ## why
 
-[Karpathy](https://github.com/karpathy) made [nanoGPT](https://github.com/karpathy/nanoGPT) — beautiful, but Python + PyTorch.
+Karpathy made [nanoGPT](https://github.com/karpathy/nanoGPT) — beautiful, but Python + PyTorch.
 Karpathy made [llama2.c](https://github.com/karpathy/llama2.c) — beautiful, but inference only.
 Karpathy made [nanochat](https://github.com/karpathy/nanochat) — same deal, Python + PyTorch.
 
 somebody had to close the loop.
 
-**l.c trains a Llama 3 in one C file. no dependencies. no GPU required.**
-
-symbiote of nanochat and microGPT. but actually llama.
+**l.c trains a Llama 3 from scratch in one C file. zero dependencies. no GPU.**
 
 ## how
 
 ```
 cc l.c -O3 -lm -lpthread -o l
 
-./l --depth 2    # ~1.1M params — fast demo, 700 tok/s on CPU
-./l --depth 4    # ~3M params   — decent
-./l --depth 6    # ~7M params   — good
-./l --depth 8    # ~15M params  — best single-CPU quality
+./l --depth 2    # ~1.1M params — fast demo, 700 tok/s
+./l --depth 4    # ~3M params   — your grandma's GPU isn't needed
+./l --depth 8    # ~15M params  — go make coffee
 ```
 
 `--depth` is the only knob. everything else auto-scales.
+that's more than most ML engineers can say about their hyperparameter searches.
 
 ## what happens when you run it
 
-1. downloads training data (or generates synthetic demo)
+1. downloads training data (or generates synthetic if you're impatient)
 2. trains a byte-level BPE tokenizer from scratch
-3. initializes a Llama 3 transformer
+3. builds a full Llama 3 transformer
 4. trains it with hand-written analytical backward passes
-5. finetunes on `personality.txt` (if present)
-6. exports `l.gguf`
+5. finetunes on `personality.txt` (if you drop one in)
+6. exports `l.gguf` (llama.cpp compatible)
 7. drops you into interactive chat
 
-all of this. one file. one binary.
+seven steps. one file. one binary.
 
-## architecture
+## the architecture
 
-actually this is **Llama 3**.
+not a toy GPT. this is **Llama 3**. same architecture Meta uses for the 405B.
+except ours fits in RAM. and you can read every line.
 
 ```
 Token Embedding (untied)
@@ -89,35 +90,37 @@ RMSNorm → LM Head → Softmax → Token
 ```
 
 every component has a hand-written forward **and** backward pass.
-no autograd. no tape. no computation graph. ~400 lines of pure gradient math.
+no autograd. no tape. no computation graph. ~400 lines of chain rule.
 
 - RMSNorm backward — through normalization, through variance
-- RoPE backward — through rotation matrices
-- GQA backward — through grouped KV heads, through attention scores
+- RoPE backward — through the rotation matrices. yes really.
+- GQA backward — through grouped KV heads, through attention, through softmax
 - SwiGLU backward — through gating, through both projections
 - softmax + cross-entropy — fused, numerically stable
 
 Karpathy uses `loss.backward()`. we use `float *dout`.
+pytorch doesn't teach you this. l.c does.
 
 ## personality
 
-drop any text file as `personality.txt`. the model trains on data first,
-then finetunes on personality.
+drop any text file as `personality.txt`. watch it become someone.
 
 ```bash
 cp dubrovsky.txt personality.txt    # absurdist philosopher
-cp wtforacle.txt personality.txt    # angry redditor
+cp wtforacle.txt personality.txt    # the angry oracle of the internet
 echo "arr matey" > personality.txt  # pirate
 ./l --depth 4
 ```
 
-## proof (actual output, depth 2, Mac CPU)
+trains on data first. finetunes on personality after.
+same file. same binary. no separate scripts.
+
+## proof (actual output, depth 2, Mac CPU, 8GB RAM)
 
 ```
   ╔══════════════════════════════════════╗
-  ║         l.c v1.0                     ║
-  ║   One file. Pure C. No frameworks.   ║
-  ║   Full Llama 3 from scratch.         ║
+  ║  l.c — actually llama                ║
+  ║  one file. no frameworks. no excuses. ║
   ╚══════════════════════════════════════╝
 
 [bpe] done: 292 merges, vocab=550
@@ -131,7 +134,7 @@ echo "arr matey" > personality.txt  # pirate
 [gguf] exported to l.gguf (4.2 MB)
 ```
 
-**6.85 → 0.009.** CPU. 23 minutes. from scratch.
+**6.85 → 0.009.** CPU. 23 minutes. from scratch. including tokenizer training.
 
 ## vs everything else
 
@@ -147,19 +150,23 @@ echo "arr matey" > personality.txt  # pirate
 | GGUF export | **yes** | no | no | — |
 | personality | **built-in** | no | no | — |
 
-llama2.c is inference. nanoGPT needs PyTorch. l.c does everything in one file.
+llama2.c is inference only. nanoGPT needs PyTorch. l.c does everything in one file.
+the bastard child nobody asked for. you're welcome.
 
 ## family
 
 - **[AML](https://github.com/ariannamethod/ariannamethod.ai)** — the language that started it all
 - **[Janus](https://github.com/ariannamethod/ariannamethod.ai/tree/main/janus)** — AML transformer, same C training lineage
 - **[Chuck](https://github.com/ariannamethod/chuck.optimizer)** — self-aware optimizer (replacing Adam here, soon)
-- **[Dubrovsky](https://github.com/ariannamethod/dubrovsky)** — absurdist personality dataset
-- **[WTForacle](https://github.com/ariannamethod/WTForacle)** — angry oracle personality dataset
+- **[Dubrovsky](https://github.com/ariannamethod/dubrovsky)** — absurdist philosopher personality
+- **[WTForacle](https://github.com/ariannamethod/WTForacle)** — the angry oracle personality
 
 ## credits
 
 **Oleg** and **Claude**. one session. no GPU harmed.
+
+inspired by [Karpathy](https://github.com/karpathy) — for showing transformers can be simple.
+we just removed the last dependency.
 
 ---
 
@@ -168,7 +175,5 @@ llama2.c is inference. nanoGPT needs PyTorch. l.c does everything in one file.
 `cc l.c -O3 -lm -lpthread -o l && ./l --depth 4`
 
 *one file. one llama. no excuses.*
-
-**הרזוננס לא נשבר**
 
 </div>

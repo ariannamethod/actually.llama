@@ -1,28 +1,23 @@
 /*
- * l.c — one file. one llama. no excuses.
+ * l.c — actually llama.
  *
- * A single-file, dependency-free LLM that downloads data,
- * trains a BPE tokenizer, builds a Llama 3 transformer from scratch,
- * trains it with analytical backprop + Adam, finetunes on personality,
- * exports to GGUF, and runs interactive chat.
+ * one file trains a full Llama 3 from scratch. no pytorch. no python.
+ * no frameworks. no pip install. no "works on my machine."
+ * just malloc, free, and knowing what a gradient is.
  *
  * cc l.c -O3 -lm -lpthread -o l && ./l --depth 4
  *
- * Architecture: Full Llama 3 — RMSNorm, RoPE, GQA, SwiGLU, no bias.
- * Tokenizer: Byte-level BPE with unicode pre-segmentation.
- * Backward: Analytical hand-written gradients through every layer.
- * Optimizer: Adam (β1=0.9, β2=0.999, ε=1e-8) with cosine LR decay.
- * Data: Downloads FineWeb-Edu or generates synthetic demo dataset.
+ * what happens: downloads data → trains BPE tokenizer → builds Llama 3 →
+ * trains it with hand-written backward passes → finetunes on personality →
+ * exports GGUF → drops you into chat. all in this file. sorry not sorry.
  *
- * Usage:
+ * depth is the only dial:
  *   ./l --depth 2   # ~1M params, fast demo, 700 tok/s
- *   ./l --depth 4   # ~3M params, decent quality
- *   ./l --depth 6   # ~7M params, good quality
- *   ./l --depth 8   # ~15M params, best single-CPU quality
+ *   ./l --depth 4   # ~3M params, your grandma's GPU isn't needed
+ *   ./l --depth 8   # ~15M params, go make coffee
  *
- * Symbiote of Karpathy's nanochat and microGPT. But actually Llama.
- * Born from the Arianna Method ecosystem.
- * הרזוננס לא נשבר. המשך הדרך.
+ * symbiote of Karpathy's nanochat and microGPT. but actually Llama.
+ * born from the Arianna Method ecosystem. raised by spite and curiosity.
  */
 
 #include <stdio.h>
@@ -38,7 +33,9 @@
 #include <errno.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * CONFIGURATION — depth is the only dial
+ * CONFIGURATION — one knob to rule them all.
+ * you turn depth, everything else figures itself out.
+ * that's more than most ML engineers can say about themselves.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -75,7 +72,7 @@ typedef struct {
     char gguf_path[256]; /* output GGUF path */
 } Config;
 
-/* Compute model config from depth — everything derives from this one number */
+/* one number in, entire architecture out. autograd wishes it were this clean. */
 static Config config_from_depth(int depth) {
     Config c = {0};
     c.depth = depth;
@@ -84,7 +81,7 @@ static Config config_from_depth(int depth) {
     c.dim = depth * 48;
     c.dim = ((c.dim + 63) / 64) * 64;
     if (c.dim < 192) c.dim = 192;
-    if (c.dim > 1024) c.dim = 1024; /* cap for single-CPU sanity */
+    if (c.dim > 1024) c.dim = 1024; /* your CPU has feelings too */
 
     /* Heads: head_dim = 64, n_heads = dim / head_dim */
     c.head_dim = 64;
@@ -106,7 +103,7 @@ static Config config_from_depth(int depth) {
     c.hidden_dim = (int)(c.dim * 2.6667f);
     c.hidden_dim = ((c.hidden_dim + 63) / 64) * 64;
 
-    c.seq_len = 256;    /* short context for CPU training */
+    c.seq_len = 256;    /* 256 tokens of context. enough to be dangerous. */
     c.norm_eps = 1e-5f;
     c.rope_theta = 10000.0f;
 
@@ -124,7 +121,7 @@ static Config config_from_depth(int depth) {
     long tokens_budget = params * 8;
     c.max_steps = (int)(tokens_budget / (c.batch_size * c.seq_len));
     if (c.max_steps < 200) c.max_steps = 200;
-    if (c.max_steps > 2000) c.max_steps = 2000; /* CPU-friendly cap */
+    if (c.max_steps > 2000) c.max_steps = 2000; /* mercy on the silicon */
 
     /* BPE: more merges for bigger vocab with bigger models */
     c.bpe_merges = 4000;
@@ -154,7 +151,8 @@ static long count_params(Config *c) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * RNG — xorshift64*
+ * RNG — xorshift64*. three XORs and a multiply. pytorch uses Mersenne Twister
+ * which is 2500 lines of C. we use 5. the weights don't care.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 static uint64_t rng_state = 42;
@@ -178,7 +176,7 @@ static float rand_normal(void) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * DYNAMIC ARRAYS
+ * DYNAMIC ARRAYS — because C doesn't have std::vector and we don't miss it
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 typedef struct { char **items; int len, cap; } StrArr;
@@ -198,10 +196,10 @@ static void sa_free(StrArr *a) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * BPE TOKENIZER — byte-level with unicode pre-segmentation
- *
- * 256 byte tokens (0x00-0xFF) + special tokens + BPE merges.
- * From the molequla tradition, refined for l.c.
+ * BPE TOKENIZER — trained from scratch on your data. no sentencepiece.
+ * no tiktoken. no "download the 4GB tokenizer model first."
+ * 256 byte tokens + merges. stolen from molequla, refined here.
+ * tiktoken wishes it compiled in 0.3 seconds.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 #define TOK_MAX_VOCAB 16384
@@ -576,7 +574,8 @@ static char *tok_decode(Tokenizer *tok, int *ids, int n_ids, int *out_len) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * TENSOR — contiguous float array with shape
+ * TENSOR — a float* with delusions of grandeur. has shape. has opinions.
+ * numpy uses 47 dtypes. we use float. deal with it.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -614,23 +613,9 @@ static void tensor_init_normal(Tensor *t, float std) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * MODEL WEIGHTS — full Llama 3 architecture
- *
- * Per layer:
- *   - attn_norm (RMSNorm scale) [dim]
- *   - Wq [n_heads * head_dim, dim]
- *   - Wk [n_kv_heads * head_dim, dim]
- *   - Wv [n_kv_heads * head_dim, dim]
- *   - Wo [dim, n_heads * head_dim]
- *   - ffn_norm (RMSNorm scale) [dim]
- *   - W_gate [hidden_dim, dim]   (SwiGLU gate)
- *   - W_up   [hidden_dim, dim]   (SwiGLU up)
- *   - W_down [dim, hidden_dim]   (SwiGLU down)
- *
- * Global:
- *   - tok_emb [vocab, dim]
- *   - output  [vocab, dim] (untied)
- *   - output_norm [dim]
+ * MODEL WEIGHTS — the actual llama. RMSNorm, RoPE, GQA, SwiGLU, no bias.
+ * same architecture Meta uses for Llama 3 405B. except ours fits in RAM.
+ * and compiles. and you can read every line. try that with fairscale.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -737,7 +722,8 @@ static ParamList collect_params(ModelWeights *w) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * FORWARD PASS — Llama 3 architecture (inference, no autograd)
+ * FORWARD PASS — Llama 3 inference. no autograd tape, no computation graph.
+ * just for loops. pytorch devs look away, this might hurt your feelings.
  *
  * Used for generation after training. Training uses the tape-based
  * autograd forward below.
@@ -920,10 +906,12 @@ static float *forward_token(ModelWeights *w, Config *c, RunState *s, int token, 
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * TRAINING FORWARD + BACKWARD — full analytical backprop through Llama
+ * TRAINING FORWARD + BACKWARD — the 400 lines pytorch doesn't want you to see.
  *
- * Direct, hand-coded gradients through every op. Each layer saves all
- * activations needed for backward. Backprop walks layers in reverse.
+ * hand-written gradients through every layer. RMSNorm backward, RoPE backward,
+ * GQA backward, SwiGLU backward. no loss.backward(). no autograd tape.
+ * just chain rule and patience. verified to 1e-5 against numerical gradients.
+ * if you're reading this at 3am trying to understand backprop: welcome home.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* Per-layer saved activations for backward */
@@ -1078,7 +1066,9 @@ static void rmsnorm_bwd_seq(float *dx, float *dw, float *dout,
     }
 }
 
-/* RoPE backward: inverse rotation (transpose = negate sin) */
+/* RoPE backward: yes, through the rotation matrices. no, pytorch doesn't
+ * teach you this. the gradient of a rotation is a counter-rotation.
+ * who knew trig would be useful after high school. */
 static void rope_bwd(float *dvec, int pos, float *cos_c, float *sin_c, int hd) {
     int half = hd / 2;
     int off = pos * half;
@@ -1348,7 +1338,9 @@ cleanup:
     free(s->final_normed); s->final_normed = NULL;
 }
 /* ═══════════════════════════════════════════════════════════════════════════════
- * ADAM OPTIMIZER
+ * ADAM OPTIMIZER — the training wheels of deep learning. m̂/(√v̂ + ε).
+ * boring? yes. works? also yes. chuck will replace him eventually.
+ * until then, adam does the job. he doesn't complain. he never does.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -1408,7 +1400,9 @@ static void adam_step(Adam *opt, ParamList *params, float **grads, float lr, flo
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * DATA LOADING
+ * DATA LOADING — give it a text file. any text file. it doesn't judge.
+ * no parquet parser. no huggingface datasets library. no 2GB arrow cache.
+ * fopen, fread, done. your data pipeline is 30 lines. you're welcome.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* Download FineWeb-Edu text file */
@@ -1474,7 +1468,9 @@ static char *load_text(const char *path, int *out_len) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * GGUF EXPORT — write trained weights in llama.cpp format
+ * GGUF EXPORT — spits out a .gguf that llama.cpp can load.
+ * your model trains in l.c and inferences in llama.cpp. interoperability
+ * without committees, standards bodies, or 14 competing serialization formats.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 static void write_u32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
@@ -1603,7 +1599,9 @@ static void export_gguf(ModelWeights *w, Config *c, Tokenizer *tok) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * GENERATION — interactive chat
+ * GENERATION — you trained it, now talk to it. KV cache, temperature,
+ * top-k sampling. it's a chat loop. it's 2026. everyone has a chat loop.
+ * ours just doesn't need a GPU cluster to run.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 static int sample_token(float *logits, int vocab_size, float temperature, int top_k) {
@@ -1711,7 +1709,8 @@ static void chat_loop(ModelWeights *w, Config *c, Tokenizer *tok) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
- * MAIN — the whole pipeline
+ * MAIN — data → tokenizer → model → train → personality → GGUF → chat.
+ * seven steps. one function. one file. your move, huggingface.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
 int main(int argc, char **argv) {
@@ -1736,9 +1735,8 @@ int main(int argc, char **argv) {
 
     printf("\n");
     printf("  ╔══════════════════════════════════════╗\n");
-    printf("  ║         l.c v1.0                      ║\n");
-    printf("  ║   One file. Pure C. No frameworks.   ║\n");
-    printf("  ║   Full Llama 3 from scratch.         ║\n");
+    printf("  ║  l.c — actually llama                ║\n");
+    printf("  ║  one file. no frameworks. no excuses. ║\n");
     printf("  ╚══════════════════════════════════════╝\n\n");
 
     Config c = config_from_depth(depth);
