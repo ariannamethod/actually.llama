@@ -37,6 +37,18 @@
 #include <omp.h>
 #endif
 
+/* BLAS ACCELERATION — optional cblas_sgemm for matmul. 3-4x speedup.
+ *   macOS:  cc l.c -O3 -lm -lpthread -DUSE_BLAS -DACCELERATE -framework Accelerate -o l
+ *   Linux:  cc l.c -O3 -lm -lpthread -DUSE_BLAS -lopenblas -o l */
+#ifdef USE_BLAS
+  #ifdef ACCELERATE
+    #define ACCELERATE_NEW_LAPACK
+    #include <Accelerate/Accelerate.h>
+  #else
+    #include <cblas.h>
+  #endif
+#endif
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * CONFIGURATION — one knob to rule them all.
  * you turn depth, everything else figures itself out.
@@ -84,11 +96,11 @@ static Config config_from_depth(int depth) {
     Config c = {0};
     c.depth = depth;
 
-    /* Dimension scaling: dim = depth * 48, rounded to multiple of 64, min 192 */
-    c.dim = depth * 48;
+    /* Dimension scaling: dim = depth * 64, each step genuinely widens the model */
+    c.dim = depth * 64;
     c.dim = ((c.dim + 63) / 64) * 64;
-    if (c.dim < 192) c.dim = 192;
-    if (c.dim > 1024) c.dim = 1024; /* your CPU has feelings too */
+    if (c.dim < 128) c.dim = 128; /* min 128: below this, attention has 1 head and no opinions */
+    if (c.dim > 768) c.dim = 768; /* max 768: your CPU has feelings and RAM has limits */
 
     /* Heads: head_dim = 64, n_heads = dim / head_dim */
     c.head_dim = 64;
@@ -138,7 +150,7 @@ static Config config_from_depth(int depth) {
     c.personality_steps = 100;
 
     snprintf(c.data_url, sizeof(c.data_url),
-        "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu-score-2/resolve/main/data/CC-MAIN-2024-10/train-00000-of-00196.parquet");
+        "https://www.gutenberg.org/cache/epub/100/pg100.txt"); /* shakespeare. 5.5MB. no parsing needed. */
     snprintf(c.data_path, sizeof(c.data_path), "l_data.txt");
     snprintf(c.personality_path, sizeof(c.personality_path), "personality.txt");
     snprintf(c.gguf_path, sizeof(c.gguf_path), "l.gguf");
@@ -1088,6 +1100,9 @@ static TrainState alloc_train_state(Config *c) {
 
 /* Matrix multiply: C[M,N] = A[M,K] @ B[N,K]^T */
 static void matmul_fwd(float *C, float *A, float *B, int M, int N, int K) {
+#ifdef USE_BLAS
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, M, N, K, 1.0f, A, K, B, K, 0.0f, C, N);
+#else
     #pragma omp parallel for
     for (int m = 0; m < M; m++) {
         float *cm = C + m * N;
@@ -1099,11 +1114,16 @@ static void matmul_fwd(float *C, float *A, float *B, int M, int N, int K) {
             cm[n] = s;
         }
     }
+#endif
 }
 
 /* C = A @ B^T backward: dA += dC @ B, dB += dC^T @ A */
 static void matmul_bwd(float *dA, float *dB, float *dC, float *A, float *B,
                         int M, int N, int K) {
+#ifdef USE_BLAS
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, M, K, N, 1.0f, dC, N, B, K, 1.0f, dA, K);
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, N, K, M, 1.0f, dC, N, A, K, 1.0f, dB, K);
+#else
     for (int m = 0; m < M; m++) {
         float *dcm = dC + m * N;
         float *am = A + m * K;
@@ -1117,6 +1137,7 @@ static void matmul_bwd(float *dA, float *dB, float *dC, float *A, float *B,
             }
         }
     }
+#endif
 }
 
 /* RMSNorm forward */
@@ -1488,26 +1509,31 @@ static void adam_step(Adam *opt, ParamList *params, float **grads, float lr, flo
  * fopen, fread, done. your data pipeline is 30 lines. you're welcome.
  * ═══════════════════════════════════════════════════════════════════════════════ */
 
-/* Download FineWeb-Edu text file */
+/* Download training text — tries curl first, falls back to synthetic */
 static int download_data(Config *c) {
     struct stat st;
     if (stat(c->data_path, &st) == 0 && st.st_size > 1000) {
         printf("[data] found existing %s (%.1f MB)\n", c->data_path,
-               (float)st.st_size / 1024 / 1024);
+               (float)st.st_size / 1048576.0f);
         return 0;
     }
 
-    printf("[data] downloading training data...\n");
-    printf("[data] NOTE: provide your own text file as '%s'\n", c->data_path);
-    printf("[data] or download FineWeb-Edu:\n");
-    printf("  curl -L 'https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu-score-2/"
-           "resolve/main/data/CC-MAIN-2024-10/train-00000-of-00196.parquet' -o shard.parquet\n");
-    printf("  python3 -c \"import pandas as pd; "
-           "df=pd.read_parquet('shard.parquet'); "
-           "open('%s','w').write('\\n'.join(df['text'].tolist()))\"\n", c->data_path);
+    /* try downloading. curl exists on every OS made after 2003. */
+    if (c->data_url[0]) {
+        printf("[data] downloading from %s...\n", c->data_url);
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "curl -sL '%s' -o '%s'", c->data_url, c->data_path);
+        int r = system(cmd);
+        if (r == 0 && stat(c->data_path, &st) == 0 && st.st_size > 1000) {
+            printf("[data] downloaded %s (%.1f MB)\n", c->data_path,
+                   (float)st.st_size / 1048576.0f);
+            return 0;
+        }
+        printf("[data] download failed (no curl? no internet? no luck?)\n");
+    }
 
-    /* Try to create a small synthetic dataset for testing */
-    printf("[data] creating small synthetic dataset for demo...\n");
+    /* fallback: synthetic. shameful but functional. */
+    printf("[data] creating synthetic dataset for demo...\n");
     FILE *f = fopen(c->data_path, "w");
     if (!f) return -1;
 
@@ -1525,12 +1551,9 @@ static int download_data(Config *c) {
         NULL
     };
 
-    /* Repeat samples to get enough training data */
-    for (int repeat = 0; repeat < 500; repeat++) {
-        for (int i = 0; samples[i]; i++) {
+    for (int repeat = 0; repeat < 500; repeat++)
+        for (int i = 0; samples[i]; i++)
             fprintf(f, "%s\n", samples[i]);
-        }
-    }
     fclose(f);
     printf("[data] created synthetic dataset: %s\n", c->data_path);
     return 0;
