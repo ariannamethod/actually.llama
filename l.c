@@ -365,6 +365,38 @@ static void tok_add(Tokenizer *tok, const char *s) {
     tok->vocab_size++;
 }
 
+static void tok_save_merges(Tokenizer *tok, const char *path) {
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", tok->n_merges);
+    for (int i = 0; i < tok->n_merges; i++)
+        fprintf(f, "%s\t%s\n", tok->merges[i].a, tok->merges[i].b);
+    fclose(f);
+    printf("[bpe] saved %d merges to %s\n", tok->n_merges, path);
+}
+
+static int tok_load_merges(Tokenizer *tok, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int nm = 0;
+    if (fscanf(f, "%d\n", &nm) != 1 || nm <= 0) { fclose(f); return 0; }
+    if (tok->merges) free(tok->merges);
+    tok->merges = calloc(nm, sizeof(MergePair));
+    tok->n_merges = 0;
+    for (int i = 0; i < nm; i++) {
+        char a[64], b[64];
+        if (fscanf(f, "%63s\t%63s\n", a, b) != 2) break;
+        strncpy(tok->merges[i].a, a, 63);
+        strncpy(tok->merges[i].b, b, 63);
+        char nt[128]; snprintf(nt, 128, "%s+%s", a, b);
+        tok_add(tok, nt);
+        tok->n_merges++;
+    }
+    fclose(f);
+    printf("[bpe] loaded %d merges from %s (vocab=%d)\n", tok->n_merges, path, tok->vocab_size);
+    return tok->n_merges > 0;
+}
+
 /* Unicode pre-segmentation: split by category boundaries */
 static char byte_category(unsigned char b) {
     if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')) return 'L';
@@ -2317,12 +2349,16 @@ int main(int argc, char **argv) {
     }
     printf("[data] loaded %d bytes (%.1f MB)\n", text_len, (float)text_len / 1024 / 1024);
 
-    /* ── Step 2: Train BPE tokenizer ── */
+    /* ── Step 2: Train BPE tokenizer (cached) ── */
     Tokenizer tok;
     tok_init(&tok);
-    /* BPE on first 1MB — O(n²) per merge, full corpus is too slow */
-    int bpe_len = text_len < 1000000 ? text_len : 1000000;
-    tok_train_bpe(&tok, text, bpe_len, c.bpe_merges);
+    if (!tok_load_merges(&tok, "l_bpe.cache") || tok.n_merges != c.bpe_merges) {
+        tok_init(&tok); /* reset if partial load */
+        /* BPE on first 1MB — O(n²) per merge, full corpus is too slow */
+        int bpe_len = text_len < 1000000 ? text_len : 1000000;
+        tok_train_bpe(&tok, text, bpe_len, c.bpe_merges);
+        tok_save_merges(&tok, "l_bpe.cache");
+    }
     c.vocab_size = tok.vocab_size;
 
     /* Tokenize training data */
